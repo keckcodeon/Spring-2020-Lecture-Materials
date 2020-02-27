@@ -1,0 +1,107 @@
+```{r install, echo=FALSE}
+#install.packages("RColorBrewer")
+library(RColorBrewer)
+#install.packages("gplots")
+library(gplots)
+setwd("~/Desktop/TCGA/")
+list.files("~/Desktop/TCGA/")
+```
+
+```{r, echo=FALSE}
+rna <- read.table("~/Desktop/TCGA/RNA/BRCA.rnaseqv2__illuminahiseq_rnaseqv2__unc_edu__Level_3__RSEM_genes_normalized__data.data.txt",header=T,row.names=1,sep='\t')
+rna <- rna[-1,]
+```
+
+```{r, echo=FALSE}
+# first I remove genes whose expression is == 0 in more than 50% of the samples:
+rem <- function(x){
+  x <- as.matrix(x)
+  x <- t(apply(x,1,as.numeric))
+  r <- as.numeric(apply(x,1,function(i) sum(i == 0)))
+  remove <- which(r > dim(x)[2]*0.5)
+  return(remove)
+}
+remove <- rem(rna)
+rna <- rna[-remove,]
+```
+
+```{r, echo=FALSE}
+#Now I need to identify normal and tumor samples. this is done using the TCGA barcode (https://wiki.nci.nih.gov/display/TCGA/TCGA+barcode). The two digits at position 14-15 of the barcode will indicate the sample type, from the link:
+#"Tumor types range from 01 - 09, normal types from 10 - 19 and control samples from 20 - 29."
+# see the values
+table(substr(colnames(rna),14,14))
+#So we have # tumor and # normal
+```
+
+```{r, echo=FALSE}
+# get the index of the normal/control samples
+n_index <- which(substr(colnames(rna),14,14) == '1')
+t_index <- which(substr(colnames(rna),14,14) == '0')
+```
+
+```{r, echo=FALSE}
+# apply voom function from limma package to normalize the data
+vm <- function(x){
+  cond <- factor(ifelse(seq(1,dim(x)[2],1) %in% t_index, 1,  0))
+  d <- model.matrix(~1+cond)
+  x <- t(apply(x,1,as.numeric))
+  ex <- voom(x,d,plot=F)
+  return(ex$E)
+}
+```
+
+```{r, echo=FALSE}
+#BiocManager::install("limma")
+library("limma")
+
+rna_vm  <- vm(rna)
+colnames(rna_vm) <- gsub('\\.','-',substr(colnames(rna),1,12))
+```
+
+```{r, echo=FALSE}
+# we can remove the old "rna" cause we don't need it anymore
+rm(rna)
+
+#Now we can finally scale the data. the reason to do so is because we don't want to use ONLY the fold changes. if we use FC then we average the expression values across all samples, losing the heterogeity that is characteristic of those data. we therefore transform data to z-score so that per each patient for each gene we will have a measure of how many SD away from the mean that is and we will consider those with Z > +/- 1.96 (roughly p=0.05 or 2 SD away) to be differentially expressed
+
+#To obtain z-scores for the RNASeq data, we use following formula:
+
+#z = [(value gene X in tumor Y)-(mean gene X in normal)]/(standard deviation X in normal)
+
+# calculate z-scores
+scal <- function(x,y){
+  mean_n <- rowMeans(y)  # mean of normal
+  sd_n <- apply(y,1,sd)  # SD of normal
+  # z score as (value - mean normal)/SD normal
+  res <- matrix(nrow=nrow(x), ncol=ncol(x))
+  colnames(res) <- colnames(x)
+  rownames(res) <- rownames(x)
+  for(i in 1:dim(x)[1]){
+    for(j in 1:dim(x)[2]){
+      res[i,j] <- (x[i,j]-mean_n[i])/sd_n[i]
+    }
+  }
+  return(res)
+}
+z_rna <- scal(rna_vm[,t_index],rna_vm[,n_index])
+# set the rownames keeping only gene name
+rownames(z_rna) <- sapply(rownames(z_rna), function(x) unlist(strsplit(x,'\\|'))[[1]])
+
+rm(rna_vm) #we don't need it anymore
+```
+
+```{r, echo=FALSE}
+#Defines number of top genes you are interested in looking at
+data <- as.matrix(z_rna)
+var_genes <- apply(data, 1, var)
+select_var <- names(sort(var_genes, decreasing=TRUE))[1:1000]
+highly_variable_lcpm <- data[select_var,]
+dim(highly_variable_lcpm)
+```
+
+```{r, echo=FALSE}
+#This will create the heatmap
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+heatmap.2(highly_variable_lcpm,col=rev(morecols(50)),trace="none", main="Top 1000 Most Variable Genes Across Patients",scale="row")
+```
